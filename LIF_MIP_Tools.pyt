@@ -16,8 +16,10 @@
 #   to do analysis
 
 # Future additions:
-#   Code the ability to read from a lithologic table and create contancts
-#   Add the ability to intersect interpolated surfaces at each point
+#   Code the ability to read from a lithologic table and create contacts
+#   Add the ability to intersect interpolated surfaces at each point e.g
+#   elevations from a DEM and GW elevation from a GW raster
+# ---------------------------------------------------------------------------------
 
 # Script Start
 # ================================================================
@@ -71,13 +73,13 @@ class Tool(object):
             displayName="MIP or LIF data directory",
             name="MIP_or_LIF_data_directory",
             datatype="DEWorkspace",
-            parameterType="Optional",
+            parameterType="Required",
             direction="Input")
         DataColumn = arcpy.Parameter(
             displayName="Data Log Column",
             name="Data_Log_Column",
             datatype="GPLong",
-            parameterType="Optional",
+            parameterType="Required",
             direction="Input")
         # ================================================================ 
 
@@ -87,7 +89,7 @@ class Tool(object):
             displayName="Output Point Dataset",
             name="Output Point Dataset",
             datatype="GPFeatureLayer",
-            parameterType="Optional",
+            parameterType="Required",
             direction="Output")
         # ================================================================ 
 
@@ -102,6 +104,8 @@ class Tool(object):
         return True
 
     def updateParameters(self, parameters):
+        # Update the choice list for bore ID fields to be a text
+        # Field present in the boring dataset
         if parameters[1].value:
             desc = arcpy.Describe(parameters[1].valueAsText)
             fields = desc.fields
@@ -113,131 +117,151 @@ class Tool(object):
         return
 
     def updateMessages(self, parameters):
-        """Modify the messages created by internal validation for each tool
-        parameter.  This method is called after internal validation."""
+        # Modify the messages created by internal validation for each tool
+        # parameter.  This method is called after internal validation.
         return
 
     def execute(self, parameters, messages):
 
-        try:
-            # Input geometry calculation section
-            # ================================================================
-            # Variables
-            CrossSectionLine = parameters[0].valueAsText
-            inputBorings = parameters[1].valueAsText
-            inputPointSR = arcpy.Describe(inputBorings).SpatialReference
+        # Classes to create objects to hold boring data
+        class Boring:
+            def __init__(self, boreID, xValue, yValues = [], dataValues = []):
+                # Constructors
+                self.boreID = boreID
+                self.xValue = xValue
+                self.yValues = yValues
+                self.dataValues = dataValues
 
-            # Create a temporary copy of the Borings that lie along the cross section line
-            tempBoringLayer = arcpy.env.scratchGDB + r"\TempBoring"
-            arcpy.SelectLayerByLocation_management(inputBorings, "INTERSECT", CrossSectionLine)
-            arcpy.CopyFeatures_management(inputBorings, tempBoringLayer)
-            arcpy.SelectLayerByAttribute_management(inputBorings, "CLEAR_SELECTION")
+        class BoringCollection:
+            # Things on instantiation go here
+            def __init__(self):
 
-            # Calculate the cumulative distances of borings along the line
-            lineIndex = 0
-            cumulativeLength = 0
-            xCoord = []
-            yCoord = []
-            arcpy.MakeFeatureLayer_management(tempBoringLayer, "tempBoringLyr")
-            arcpy.AddField_management(tempBoringLayer, "DistanceFromStart", "DOUBLE")
+                # Constructors
+                self.boringCollection = []
 
-            cursor= arcpy.da.SearchCursor(CrossSectionLine, ["SHAPE@"])
-            for row in cursor:
-                for lines in row:
-                    for line in lines:
-                        for point in line:
-                            # Create a temp point at each vertex along this line
-                            xCoord.append(point.X)
-                            yCoord.append(point.Y)
-                            rawPoint = arcpy.Point(xCoord[lineIndex], yCoord[lineIndex])
-                            point = arcpy.PointGeometry(rawPoint)
-                            tempPoint = arcpy.env.scratchGDB + r"\TempPoint"
-                            arcpy.CopyFeatures_management(point, tempPoint)
-                            arcpy.DefineProjection_management(tempPoint, inputPointSR)
+            # Methods
+            def addboring(self, boreID, xValue):
+                boringToAdd = Boring(boreID, xValue)
+                self.boringCollection.append(boringToAdd)
+                arcpy.AddMessage(len(self.boringCollection))                           
 
-                            # Select the a point on the temp boring layer based on the temp point
-                            # this will select the points in the temp point layer by their order on line
-                            arcpy.SelectLayerByLocation_management("tempBoringLyr", "INTERSECT", tempPoint, "", "NEW_SELECTION", "NOT_INVERT")
+            def addboringdata(self,boreID, yValues = [], dataValues = []):
+                i = 0
+                for boring in self.boringCollection:
+                    if boring.boreID == boreID:
+                        self.boringCollection[i].yValues = yValues
+                        self.boringCollection[i].dataValues = dataValues
+                    i += 1 
+        #try:
+        # Input geometry calculation section
+        # ================================================================
+        # Variables
+        CrossSectionLine = parameters[0].valueAsText
+        inputBorings = parameters[1].valueAsText
+        inputPointSR = arcpy.Describe(inputBorings).SpatialReference
 
-                            if lineIndex > 0:
-                                cumulativeLength += math.sqrt((xCoord[lineIndex] - xCoord[lineIndex-1])**2 + (yCoord[lineIndex] - yCoord[lineIndex-1])**2)
-                            arcpy.CalculateField_management("tempBoringLyr", "DistanceFromStart", cumulativeLength)
-                            arcpy.SelectLayerByAttribute_management("tempBoringLyr", "CLEAR_SELECTION")
-                            arcpy.Delete_management(tempPoint)
-                            lineIndex += 1
-            del cursor
-            # ================================================================
+        # Create a temporary copy of the Borings that lie along the cross section line
+        tempBoringLayer = os.path.join(arcpy.env.scratchGDB, "TempBoring")
+        arcpy.SelectLayerByLocation_management(inputBorings, "INTERSECT", CrossSectionLine)
+        arcpy.CopyFeatures_management(inputBorings, tempBoringLayer)
+        arcpy.SelectLayerByAttribute_management(inputBorings, "CLEAR_SELECTION")
 
-            # Classes to create objects to hold boring data
-            class Boring:
-                def __init__(self, boreID, xValue):
-                    self.boreID = boreID
-                    self.xValue = xValue
+        # Calculate the cumulative distances of borings along the line
+        lineIndex = 0
+        cumulativeLength = 0
+        xCoord = []
+        yCoord = []
+        arcpy.AddField_management(tempBoringLayer, "DistanceFromStart", "DOUBLE")
+        arcpy.MakeFeatureLayer_management(tempBoringLayer, "tempBoringLyr")
 
-            class BoringData:
-                def __init__(self, boreID, xValue, yValues = [], dataValues = []):                
-                    self.boreID = boreID
-                    self.xValue = xValue    
-                    self.yValues = yValues
-                    self.dataValues = dataValues
+        # create an instance of boing collection to create a collection of boring information
+        boringCollection = BoringCollection()
 
-            boringInfo = []
-            with arcpy.da.SearchCursor(tempBoringLayer, [parameters[2].valueAsText, "DistanceFromStart"]) as cursor:
-                for row in cursor:
-                    
-                    boring = Boring(row[0], row[1])
-                    boringInfo.append(boring)
-            
-            boringDataObjects = []
-            for root, dirs, files in os.walk(parameters[3].valueAsText):
-                for filename in files:
-                    ext = filename.split(".")
-                    if ext[-1].upper() == "MHP":
+        # use a serach cursor to "walk" down the cross section line and select borings based on
+        # the order they were drawn
+        cursor = arcpy.da.SearchCursor(CrossSectionLine, ["SHAPE@"])
+        for row in cursor:
+            for lines in row:
+                for line in lines:
+                    for point in line:
+                        # Create a temp point at each vertex along this line
+                        xCoord.append(point.X)
+                        yCoord.append(point.Y)
+                        rawPoint = arcpy.Point(xCoord[lineIndex], yCoord[lineIndex])
+                        point = arcpy.PointGeometry(rawPoint)
+                        tempPoint = os.path.join(arcpy.env.scratchGDB, "TempPoint")
+                        arcpy.CopyFeatures_management(point, tempPoint)
+                        arcpy.MakeFeatureLayer_management(tempPoint, "tempPoint"+str(lineIndex))
 
-                        fileBoreID = filename
-                        if fileBoreID[4] == "0":
-                            fileBoreID = fileBoreID[:4] + fileBoreID[5:]
-                            fileBoreID = fileBoreID[:-4]
-                        elif fileBoreID[3] == "0":
-                            fileBoreID = fileBoreID[:3] + fileBoreID[4:]
-                            fileBoreID = fileBoreID[:-4]
-                        arcpy.AddMessage("ID from file " + fileBoreID)
+                        # Select the point on the temp boring layer based on the temp point
+                        # this will select the points in the temp point layer by their order on line
+                        arcpy.SelectLayerByLocation_management("tempBoringLyr", "INTERSECT", "tempPoint"+str(lineIndex), "", "NEW_SELECTION", "NOT_INVERT")
+                        arcpy.Delete_management(tempPoint)
 
-                        depths = []
-                        data = []
-                        with open(os.path.join(root, filename), "r") as lines:
-                            for line in lines:
-                                lineParts = line.split('\t')
-                                if lineParts[0].replace('.','',1).isdigit() and lineParts[int(parameters[4].valueAsText)-1].replace('.','',1).isdigit():
-                                    depths.append(lineParts[0])
-                                    data.append(lineParts[int(parameters[4].valueAsText)-1]) 
-                        i = 0                    
-                        while i <= len(boringInfo) - 1:
-                            arcpy.AddMessage(boringInfo[i].boreID)
-                            if fileBoreID == boringInfo[i].boreID:
-                                boringData = BoringData(filename, boringInfo[i].xValue, depths, data)
-                                boringDataObjects.append(boringData)
+                        if lineIndex > 0:
+                            cumulativeLength += math.sqrt((xCoord[lineIndex] - xCoord[lineIndex-1])**2 + (yCoord[lineIndex] - yCoord[lineIndex-1])**2)
+
+                        cursor = arcpy.da.SearchCursor("tempBoringLyr", parameters[2].valueAsText)
+                        i = 0
+                        for row in cursor:
                             i += 1
+                            boringCollection.addboring(row[0], cumulativeLength)
+                        arcpy.SelectLayerByAttribute_management("tempBoringLyr", "CLEAR_SELECTION")
+                        lineIndex += 1
+        del cursor
 
-            # Output data creation section
-            # ================================================================
+        # Iterate through the data directory and pull the depth and data values to complete
+        # the corresponding boring object in the boring collection
+        arcpy.AddMessage("Reading data from MIP/LIF data logs")
+        for root, dirs, files in os.walk(parameters[3].valueAsText):
+            for filename in files:
+                ext = filename.split(".")
+                if ext[-1].upper() == "MHP" or ext[-1].upper() == "TXT":
 
-            outputDataset = parameters[5].valueAsText
-            outputDirectory = os.path.dirname(os.path.abspath(outputDataset))
-            out_file_name = os.path.basename(outputDataset)
-            arcpy.CreateFeatureclass_management(outputDirectory, out_file_name, "POINT")
-            arcpy.AddField_management(outputDataset, "VALUE", "DOUBLE")
+                    fileBoreID = filename
+                    if fileBoreID[4] == "0":
+                        fileBoreID = fileBoreID[:4] + fileBoreID[5:]
+                        fileBoreID = fileBoreID[:-4]
+                    elif fileBoreID[3] == "0":
+                        fileBoreID = fileBoreID[:3] + fileBoreID[4:]
+                        fileBoreID = fileBoreID[:-4]
+                    arcpy.AddMessage("ID from file " + fileBoreID)
 
-            for boringDataObject in boringDataObjects:
-                x = boringDataObject.xValue
-                for i in range(len(boringDataObject.yValues)):
-                    row = (boringDataObject.dataValues[i], ( x , boringDataObject.yValues[i]))
-                    cursor = arcpy.da.InsertCursor(outputDataset,  ["VALUE", "SHAPE@XY"])
-                    cursor.insertRow(row)
-                    del cursor
-            # ================================================================
-        except Exception as e:
-            arcpy.AddMessage(e)
-        finally:
-            arcpy.Delete_management(tempBoringLayer)
+                    depths = []
+                    data = []
+                    with open(os.path.join(root, filename), "r") as lines:
+                        for line in lines:
+                            lineParts = line.split('\t')
+                            if lineParts[0].replace('.','',1).isdigit() and lineParts[int(parameters[4].valueAsText)-1].replace('.','',1).isdigit():
+                                depths.append(float(lineParts[0])*-1)
+                                data.append(lineParts[int(parameters[4].valueAsText)-1]) 
+
+                    # Add the y and data values to the corresponding boring
+                    # in the boring collection here
+                    boringCollection.addboringdata(fileBoreID, depths, data)
+
+
+        # Output data creation section
+        # ================================================================
+
+        outputDataset = parameters[5].valueAsText
+        outputDirectory = os.path.dirname(os.path.abspath(outputDataset))
+        out_file_name = os.path.basename(outputDataset)
+        arcpy.CreateFeatureclass_management(outputDirectory, out_file_name, "POINT")
+        arcpy.AddField_management(outputDataset, "BOREID", "TEXT")
+        arcpy.AddField_management(outputDataset, "VALUE", "DOUBLE")
+
+        for boringDataObject in boringCollection.boringCollection:
+            x = boringDataObject.xValue
+            boreID = boringDataObject.boreID
+            for i in range(len(boringDataObject.yValues)):
+                row = (boringDataObject.dataValues[i], boreID, (x , boringDataObject.yValues[i]))
+                cursor = arcpy.da.InsertCursor(outputDataset,  ["VALUE", "BOREID", "SHAPE@XY"])
+                cursor.insertRow(row)
+                del cursor
+        # ================================================================
+        #except Exception as e:
+            #arcpy.AddMessage(e)
+        #finally:
+        arcpy.Delete_management(tempBoringLayer)
         return
