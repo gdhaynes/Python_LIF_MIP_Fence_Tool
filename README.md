@@ -36,6 +36,6 @@ Future work:
 		Monitor Wells
 		Lithologic Soil Borings
 	Drawing of lithologic features, that data will come from:
-		An access database created by the winlog program
+		An some kind of database
 		Conductivity readings from the MIP/LIF
 	
